@@ -1,16 +1,11 @@
-use bytes::Bytes;
-use std::convert::Infallible;
-use std::io::ErrorKind;
+use std::collections::HashMap;
+use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
+use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-
-use http_body_util::Full;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper::{server::conn::http1, service::service_fn};
-use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock};
+use url::Url;
 
 async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) -> () {
     let mut buf = vec![0; 10 * 1024];
@@ -20,14 +15,14 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
                 if n == 0 {
                     break;
                 } else {
-                    println!("{}: read result={}", id, n);
+                    // println!("{}: read result={}", id, n);
                     match writer.write(&buf[..n]).await {
                         Ok(n) => {
                             let _ = writer.flush().await;
-                            println!("{}: write result={}", id, n);
+                            // println!("{}: write result={}", id, n);
                         }
                         Err(e) => {
-                            eprintln!("Error: {}", e.to_string());
+                            eprintln!("{id}: error: {}", e.to_string());
                             if e.kind() == ErrorKind::ConnectionReset {
                                 break;
                             } else {
@@ -38,7 +33,7 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
                 }
             }
             Err(e) => {
-                eprintln!("Error: {}", e.to_string());
+                eprintln!("{id}: error: {}", e.to_string());
                 continue;
             }
         }
@@ -47,10 +42,7 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
 
 async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     let stream = TcpStream::connect(uri).await?;
-    //let remote = Arc::new(RwLock::new(stream));
-    println!("connected to {}", uri);
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
-    //let http = b"HTTP/1.1 405 Method Not Allowed\r\n\r\n";
 
     let mut client_half = client.into_split();
     let mut remote_half = stream.into_split();
@@ -59,11 +51,7 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     client_half.1.flush().await?;
 
     let remote_to_client = tokio::spawn(async move {
-        let id = format!(
-            "remote_to_client #{}/{:?}",
-            tokio::task::id(),
-            std::thread::current().id()
-        );
+        let id = format!("remote_to_client[{}]", tokio::task::id());
         println!("{id} task start");
         relay(&id, &mut remote_half.0, &mut client_half.1).await;
         drop(client_half.1);
@@ -71,15 +59,11 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     });
 
     let client_to_remote = tokio::spawn(async move {
-        let id = format!(
-            "client_to_remote #{}/{:?}",
-            tokio::task::id(),
-            std::thread::current().id()
-        );
-        println!("{id} task start");
+        let id = format!("client_to_remote[{}]", tokio::task::id());
+        println!("{id}: task start");
         relay(&id, &mut client_half.0, &mut remote_half.1).await;
         drop(remote_half.1);
-        println!("{id} task end");
+        println!("{id}: task end");
     });
 
     let _ = remote_to_client.await;
@@ -88,16 +72,70 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-async fn request(stream: TcpStream, uri: &str) -> Result<(), std::io::Error> {
-    let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-    let (_, mut writer) = stream.into_split();
-    let _ = writer.write(http.as_bytes()).await;
-    let _ = writer.flush().await;
-    let _ = writer.shutdown().await;
+async fn request<'a>(
+    client: TcpStream,
+    req: &httparse::Request<'_, '_>,
+) -> Result<(), std::io::Error> {
+    //let path = Path::new(req.path.unwrap());
+    //let basename = path.file_name().unwrap().to_os_string();
+    //let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+    let url = match Url::parse(req.path.unwrap()) {
+        Ok(u) => u,
+        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "URL parse error")),
+    };
+
+    let mut http = String::new();
+    http += &format!("GET {} HTTP/1.1\r\n", url.path());
+    //http += &format!("Host: {}\r\n", url.host_str().unwrap());
+    for header in req.headers.iter() {
+        http += &format!(
+            "{}: {}\r\n",
+            header.name,
+            String::from_utf8_lossy(header.value)
+        );
+    }
+    http += &format!("Accept: /\r\n");
+    http += &format!("Connection: close\r\n");
+    http += &format!("\r\n\r\n");
+
+    let addr = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
+    let mut stream = TcpStream::connect(addr).await?;
+    //println!("{:#?}", http);
+    stream.write(http.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut buf = vec![0u8; 4096];
+    let mut client_half = client.into_split();
+
+    loop {
+        let len = stream.read(&mut buf).await?;
+        if len == 0 {
+            break;
+        }
+        client_half.1.write(&buf[..len]).await?;
+        client_half.1.flush().await?;
+    }
+
+    //let _ = writer.write(http.as_bytes()).await;
+    //let _ = writer.flush().await;
+    //let _ = writer.shutdown().await;
+
+    stream.shutdown().await?;
+    drop(client_half.1);
+
     Ok(())
 }
 
-async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
+async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
+    let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+    let (_, mut writer) = stream.into_split();
+    writer.write(http.as_bytes()).await?;
+    writer.flush().await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_client(client: TcpStream, _addr: SocketAddr) -> Result<(), std::io::Error> {
     let mut buf = vec![0; 1024];
     let mut nread: usize = 0;
 
@@ -112,13 +150,22 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
                 match req.parse(&mut buf) {
                     Ok(status) => {
                         if status.is_complete() {
-                            //println!("{:#?}", req);
                             if req.method.unwrap() == "CONNECT" {
-                                println!("tunnel to: {}", req.path.unwrap());
+                                println!("CONNECT {}", req.path.unwrap());
                                 tunnel(client, req.path.unwrap()).await?;
                             } else if req.method.unwrap() == "GET" {
-                                println!("GET: {}", req.path.unwrap());
-                                request(client, req.path.unwrap()).await?;
+                                println!("GET {}", req.path.unwrap());
+                                let mut headers: HashMap<&str, String> = HashMap::new();
+                                let iter = req.headers.iter();
+                                for h in iter {
+                                    headers.insert(
+                                        h.name,
+                                        String::from_utf8(h.value.to_vec()).unwrap(),
+                                    );
+                                }
+                                request(client, &req).await?;
+                            } else {
+                                not_allowed(client).await?;
                             }
                             break;
                         } else {
@@ -126,8 +173,7 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
                         }
                     }
                     Err(e) => {
-                        eprintln!("HTTP parse error: {e}");
-                        break;
+                        return Err(Error::new(ErrorKind::InvalidData, e.to_string()));
                     }
                 }
             }
@@ -154,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::spawn(async move {
             match handle_client(stream, addr).await {
                 Ok(_) => (),
-                Err(_) => eprintln!("error"),
+                Err(e) => eprintln!("error: {}", e.to_string()),
             }
         });
     }
