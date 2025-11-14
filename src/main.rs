@@ -2,10 +2,17 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
+use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use url::Url;
+
+mod cli;
+use cli::Cli;
+mod config;
+use config::CONFIG;
 
 async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) -> () {
     let mut buf = vec![0; 10 * 1024];
@@ -191,7 +198,15 @@ async fn handle_client(client: TcpStream, _addr: SocketAddr) -> Result<(), std::
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cli = Cli::parse();
+
+    if cli.c.is_some() {
+        config::load(cli.c.unwrap().as_str())?;
+    }
+    let config = CONFIG.read().unwrap();
+
     let addr: SocketAddr = ([0, 0, 0, 0], 3000).into();
+    SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
 
     let listener = TcpListener::bind(addr).await?;
     eprintln!("Listening on http://{}", addr);
