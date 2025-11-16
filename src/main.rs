@@ -1,9 +1,9 @@
+use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::str::FromStr;
-use clap::Parser;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -16,33 +16,47 @@ use config::CONFIG;
 
 async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) -> () {
     let mut buf = vec![0; 10 * 1024];
+    let config = CONFIG.read().await;
+    let idle_timeout: u64 = config.idle_timeout.into();
+
     loop {
-        match reader.read(&mut buf).await {
-            Ok(n) => {
-                if n == 0 {
-                    break;
-                } else {
-                    // println!("{}: read result={}", id, n);
-                    match writer.write(&buf[..n]).await {
-                        Ok(n) => {
-                            let _ = writer.flush().await;
-                            // println!("{}: write result={}", id, n);
-                        }
-                        Err(e) => {
-                            eprintln!("{id}: error: {}", e.to_string());
-                            if e.kind() == ErrorKind::ConnectionReset {
-                                break;
-                            } else {
-                                continue;
+        let mut is_error = false;
+        /* Timeout for 10 minutes of no activity */
+        if let Err(_) = tokio::time::timeout(Duration::from_secs(idle_timeout), async {
+            match reader.read(&mut buf).await {
+                Ok(n) => {
+                    if n > 0 {
+                        // println!("{}: read result={}", id, n);
+                        match writer.write(&buf[..n]).await {
+                            Ok(_) => {
+                                let _ = writer.flush().await;
+                                // println!("{}: write result={}", id, n);
+                            }
+                            Err(e) => {
+                                eprintln!("{id}: write error: {}", e.to_string());
+                                if e.kind() != ErrorKind::ConnectionReset {
+                                    is_error = true;
+                                }
                             }
                         }
+                        //return Ok(());
+                    } else {
+                        is_error = true;
                     }
                 }
+                Err(e) => {
+                    eprintln!("{id}: read error: {}", e.to_string());
+                    is_error = true;
+                }
             }
-            Err(e) => {
-                eprintln!("{id}: error: {}", e.to_string());
-                continue;
-            }
+        })
+        .await
+        {
+            eprintln!("task {id} idle timeout");
+            break;
+        }
+        if is_error {
+            break;
         }
     }
 }
@@ -67,10 +81,10 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
 
     let client_to_remote = tokio::spawn(async move {
         let id = format!("client_to_remote[{}]", tokio::task::id());
-        println!("{id}: task start");
+        println!("{id} task start");
         relay(&id, &mut client_half.0, &mut remote_half.1).await;
         drop(remote_half.1);
-        println!("{id}: task end");
+        println!("{id} task end");
     });
 
     let _ = remote_to_client.await;
@@ -201,15 +215,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
     if cli.c.is_some() {
-        config::load(cli.c.unwrap().as_str())?;
+        config::load(cli.c.unwrap().as_str()).await?;
     }
-    let config = CONFIG.read().unwrap();
 
-    let addr: SocketAddr = ([0, 0, 0, 0], 3000).into();
-    SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
+    let config = CONFIG.read().await;
 
+    let addr = SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
     let listener = TcpListener::bind(addr).await?;
     eprintln!("Listening on http://{}", addr);
+    
+
     loop {
         let (stream, addr) = listener.accept().await?;
         tokio::spawn(async move {
