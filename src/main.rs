@@ -147,7 +147,7 @@ async fn request<'a>(
     Ok(())
 }
 
-async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
+async fn request_not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
     let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
     let (_, mut writer) = stream.into_split();
     writer.write(http.as_bytes()).await?;
@@ -156,9 +156,19 @@ async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-async fn handle_client(client: TcpStream, _addr: SocketAddr) -> Result<(), std::io::Error> {
+async fn forbidden_access(stream: TcpStream) -> Result<(), std::io::Error> {
+    let http = "HTTP/1.1 403 Forbidden\r\n\r\n";
+    let (_, mut writer) = stream.into_split();
+    writer.write(http.as_bytes()).await?;
+    writer.flush().await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
     let mut buf = vec![0; 1024];
     let mut nread: usize = 0;
+    let config = CONFIG.read().await;
 
     loop {
         client.readable().await?;
@@ -173,7 +183,11 @@ async fn handle_client(client: TcpStream, _addr: SocketAddr) -> Result<(), std::
                         if status.is_complete() {
                             if req.method.unwrap() == "CONNECT" {
                                 println!("CONNECT {}", req.path.unwrap());
-                                tunnel(client, req.path.unwrap()).await?;
+                                if config.is_allowed(&addr.ip()) {
+                                    tunnel(client, req.path.unwrap()).await?;
+                                } else {
+                                    forbidden_access(client).await?;
+                                }
                             } else if req.method.unwrap() == "GET" {
                                 println!("GET {}", req.path.unwrap());
                                 let mut headers: HashMap<&str, String> = HashMap::new();
@@ -186,7 +200,7 @@ async fn handle_client(client: TcpStream, _addr: SocketAddr) -> Result<(), std::
                                 }
                                 request(client, &req).await?;
                             } else {
-                                not_allowed(client).await?;
+                                request_not_allowed(client).await?;
                             }
                             break;
                         } else {
@@ -219,14 +233,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = CONFIG.read().await;
-
     let addr = SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
     let listener = TcpListener::bind(addr).await?;
     eprintln!("Listening on http://{}", addr);
-    
 
     loop {
         let (stream, addr) = listener.accept().await?;
+        eprintln!("Handle client={}", addr.ip().to_string());
         tokio::spawn(async move {
             match handle_client(stream, addr).await {
                 Ok(_) => (),
