@@ -21,16 +21,13 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
 
     loop {
         let mut is_error = false;
-        /* Timeout for 10 minutes of no activity */
         if let Err(_) = tokio::time::timeout(Duration::from_secs(idle_timeout), async {
             match reader.read(&mut buf).await {
                 Ok(n) => {
                     if n > 0 {
-                        // println!("{}: read result={}", id, n);
                         match writer.write(&buf[..n]).await {
                             Ok(_) => {
                                 let _ = writer.flush().await;
-                                // println!("{}: write result={}", id, n);
                             }
                             Err(e) => {
                                 eprintln!("{id}: write error: {}", e.to_string());
@@ -39,7 +36,6 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
                                 }
                             }
                         }
-                        //return Ok(());
                     } else {
                         is_error = true;
                     }
@@ -62,6 +58,8 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
 }
 
 async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
+    eprintln!("tunnel[{}] start", tokio::task::id());
+
     let stream = TcpStream::connect(uri).await?;
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
 
@@ -73,22 +71,24 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
 
     let remote_to_client = tokio::spawn(async move {
         let id = format!("remote_to_client[{}]", tokio::task::id());
-        println!("{id} task start");
+        eprintln!("{id} task start");
         relay(&id, &mut remote_half.0, &mut client_half.1).await;
         drop(client_half.1);
-        println!("{id} task end");
+        eprintln!("{id} task end");
     });
 
     let client_to_remote = tokio::spawn(async move {
         let id = format!("client_to_remote[{}]", tokio::task::id());
-        println!("{id} task start");
+        eprintln!("{id} task start");
         relay(&id, &mut client_half.0, &mut remote_half.1).await;
         drop(remote_half.1);
-        println!("{id} task end");
+        eprintln!("{id} task end");
     });
 
     let _ = remote_to_client.await;
     let _ = client_to_remote.await;
+
+    eprintln!("tunnel[{}] end", tokio::task::id());
 
     Ok(())
 }
