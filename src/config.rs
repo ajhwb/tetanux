@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader};
 use std::net::IpAddr;
 use std::str::FromStr;
 use tokio::sync::RwLock;
+use trust_dns_resolver::config::ResolverConfig;
 
 const DEFAULT_ADDR: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
@@ -16,6 +17,7 @@ pub struct Config {
     pub idle_timeout: u16,
     allow_list: Vec<IpAddr>,
     deny_list: Vec<IpAddr>,
+    pub doh_resolver: Option<ResolverConfig>,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             idle_timeout: MAX_IDLE_TIMEOUT,
             allow_list: vec![],
             deny_list: vec![],
+            doh_resolver: None,
         }
     }
 }
@@ -79,6 +82,15 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
                 }
             } else {
                 println!("{value} parse error");
+            }
+        }
+        // Additional configs
+        "DoHResolver" => {
+            config.doh_resolver = match value {
+                "cloudfare" => Some(ResolverConfig::cloudflare_tls()),
+                "google" => Some(ResolverConfig::google_tls()),
+                "quad9" => Some(ResolverConfig::quad9_tls()),
+                _ => None,
             }
         }
         _ => (),

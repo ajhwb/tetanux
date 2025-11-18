@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,6 +13,8 @@ mod cli;
 use cli::Cli;
 mod config;
 use config::CONFIG;
+mod resolver;
+use resolver::resolve;
 
 async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) -> () {
     let mut buf = vec![0; 10 * 1024];
@@ -59,8 +61,18 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
 
 async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     eprintln!("tunnel[{}] start", tokio::task::id());
+    let stream: TcpStream;
+    let config = CONFIG.read().await;
 
-    let stream = TcpStream::connect(uri).await?;
+    if let Some(r) = &config.doh_resolver {
+        let n = uri.find(':').unwrap();
+        let addrs = resolve(r.clone(), &uri[..n]).await?;
+        // https://doc.rust-lang.org/std/net/trait.ToSocketAddrs.html
+        stream = TcpStream::connect(&addrs[..]).await?;
+    } else {
+        stream = TcpStream::connect(uri).await?;
+    }
+    
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
 
     let mut client_half = client.into_split();

@@ -11,3 +11,5 @@ url = "2.5.7"
 clap = { version = "4.5.51", features = ["derive"] }
 lazy_static = "1.5.0"
 ipnet = "2.11.0"
+#hickory-resolver = { version = "0.25.2", features = ["full"] }
+trust-dns-resolver = { version = "*", features = ["dns-over-rustls"] }
