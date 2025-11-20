@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader};
 use std::net::IpAddr;
 use std::str::FromStr;
 use tokio::sync::RwLock;
-use trust_dns_resolver::config::ResolverConfig;
+use hickory_resolver::config::ResolverConfig;
 
 const DEFAULT_ADDR: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
@@ -87,9 +87,9 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
         // Additional configs
         "DoHResolver" => {
             config.doh_resolver = match value {
-                "cloudfare" => Some(ResolverConfig::cloudflare_tls()),
-                "google" => Some(ResolverConfig::google_tls()),
-                "quad9" => Some(ResolverConfig::quad9_tls()),
+                "cloudfare" => Some(ResolverConfig::cloudflare_https()),
+                "google" => Some(ResolverConfig::google_https()),
+                "quad9" => Some(ResolverConfig::quad9_https()),
                 _ => None,
             }
         }

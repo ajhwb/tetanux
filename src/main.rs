@@ -1,7 +1,6 @@
 use clap::Parser;
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,35 +15,28 @@ use config::CONFIG;
 mod resolver;
 use resolver::resolve;
 
-async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) -> () {
-    let mut buf = vec![0; 10 * 1024];
+async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) {
+    let mut buf = vec![0; 8 * 1024];
     let config = CONFIG.read().await;
     let idle_timeout: u64 = config.idle_timeout.into();
 
     loop {
-        let mut is_error = false;
+        let mut nread: usize = 0;
+        let mut is_end = false;
+
         if let Err(_) = tokio::time::timeout(Duration::from_secs(idle_timeout), async {
             match reader.read(&mut buf).await {
                 Ok(n) => {
                     if n > 0 {
-                        match writer.write(&buf[..n]).await {
-                            Ok(_) => {
-                                let _ = writer.flush().await;
-                            }
-                            Err(e) => {
-                                eprintln!("{id}: write error: {}", e.to_string());
-                                if e.kind() != ErrorKind::ConnectionReset {
-                                    is_error = true;
-                                }
-                            }
-                        }
+                        nread = n;
                     } else {
-                        is_error = true;
+                        // EOF
+                        is_end = true;
                     }
                 }
                 Err(e) => {
                     eprintln!("{id}: read error: {}", e.to_string());
-                    is_error = true;
+                    is_end = true;
                 }
             }
         })
@@ -53,13 +45,81 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
             eprintln!("task {id} idle timeout");
             break;
         }
-        if is_error {
+
+        if is_end {
             break;
+        }
+
+        if let Err(e) = writer.write(&buf[..nread]).await {
+            eprintln!("{id}: write error: {}", e.to_string());
+            break;
+        } else {
+            if let Err(e) = writer.flush().await {
+                eprintln!("{id}: write error: {}", e.to_string());
+                break;
+            }
         }
     }
 }
 
 async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
+    let tunnel_id = tokio::task::id();
+    eprintln!("tunnel[{tunnel_id}] start");
+    let stream: TcpStream;
+    let config = CONFIG.read().await;
+
+    if let Some(r) = &config.doh_resolver {
+        let n = uri.find(':').unwrap();
+        let addrs = resolve(r.clone(), &uri[..n]).await.expect("resolve error");
+        // https://doc.rust-lang.org/std/net/trait.ToSocketAddrs.html
+        stream = TcpStream::connect(&addrs[..]).await?;
+    } else {
+        stream = TcpStream::connect(uri).await?;
+    }
+
+    let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
+
+    let mut client_half = client.into_split();
+    let mut remote_half = stream.into_split();
+
+    client_half.1.write_all(http.as_bytes()).await?;
+    client_half.1.flush().await?;
+
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
+    let mut cancel_rx_clone = cancel_rx.clone();
+
+    let remote_to_client = tokio::spawn(async move {
+        let id = format!("remote_to_client[{tunnel_id}:{}]", tokio::task::id());
+        eprintln!("{id} start");
+        tokio::select! {
+            _ = relay(&id, &mut remote_half.0, &mut client_half.1) => {}
+            _ = cancel_rx.changed() => {},
+        }
+        drop(client_half.1);
+        eprintln!("{id} end");
+    });
+
+    let client_to_remote = tokio::spawn(async move {
+        let id = format!("client_to_remote[{}:{}]", tunnel_id, tokio::task::id());
+        eprintln!("{id} start");
+
+        tokio::select! {
+            _ = relay(&id, &mut client_half.0, &mut remote_half.1) => {}
+            _ = cancel_rx_clone.changed() => {}
+        }
+        drop(remote_half.1);
+        let _ = cancel_tx.send(());
+        eprintln!("{id} end");
+    });
+
+    let _ = tokio::try_join!(remote_to_client, client_to_remote);
+
+    eprintln!("tunnel[{tunnel_id}] end");
+
+    Ok(())
+}
+
+async fn tunnel2(mut client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     eprintln!("tunnel[{}] start", tokio::task::id());
     let stream: TcpStream;
     let config = CONFIG.read().await;
@@ -72,39 +132,21 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     } else {
         stream = TcpStream::connect(uri).await?;
     }
-    
+
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    client.write_all(http.as_bytes()).await?;
+    client.flush().await?;
 
-    let mut client_half = client.into_split();
-    let mut remote_half = stream.into_split();
+    let mut remote = stream;
 
-    client_half.1.write_all(http.as_bytes()).await?;
-    client_half.1.flush().await?;
-
-    let remote_to_client = tokio::spawn(async move {
-        let id = format!("remote_to_client[{}]", tokio::task::id());
-        eprintln!("{id} task start");
-        relay(&id, &mut remote_half.0, &mut client_half.1).await;
-        drop(client_half.1);
-        eprintln!("{id} task end");
-    });
-
-    let client_to_remote = tokio::spawn(async move {
-        let id = format!("client_to_remote[{}]", tokio::task::id());
-        eprintln!("{id} task start");
-        relay(&id, &mut client_half.0, &mut remote_half.1).await;
-        drop(remote_half.1);
-        eprintln!("{id} task end");
-    });
-
-    let _ = remote_to_client.await;
-    let _ = client_to_remote.await;
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
 
     eprintln!("tunnel[{}] end", tokio::task::id());
 
     Ok(())
 }
 
+/*
 async fn request<'a>(
     client: TcpStream,
     req: &httparse::Request<'_, '_>,
@@ -158,8 +200,54 @@ async fn request<'a>(
 
     Ok(())
 }
+    */
 
-async fn request_not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
+async fn get<'a>(
+    client: TcpStream,
+    path: &str,
+    headers: &[httparse::Header<'_>],
+) -> Result<(), std::io::Error> {
+    let url = match Url::parse(path) {
+        Ok(u) => u,
+        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "URL parse error")),
+    };
+
+    let mut http = String::new();
+    http += &format!("GET {} HTTP/1.1\r\n", url.path());
+
+    for header in headers.iter() {
+        http += &format!(
+            "{}: {}\r\n",
+            header.name,
+            String::from_utf8_lossy(header.value)
+        );
+    }
+    http += &format!("Accept: /\r\n");
+    http += &format!("Connection: close\r\n");
+    http += &format!("\r\n\r\n");
+
+    let addr = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
+    let mut stream = TcpStream::connect(addr).await?;
+
+    stream.write(http.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut buf = vec![0u8; 4096];
+    let mut client_half = client.into_split();
+
+    loop {
+        let len = stream.read(&mut buf).await?;
+        if len == 0 {
+            break;
+        }
+        client_half.1.write(&buf[..len]).await?;
+        client_half.1.flush().await?;
+    }
+
+    Ok(())
+}
+
+async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
     let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
     let (_, mut writer) = stream.into_split();
     writer.write(http.as_bytes()).await?;
@@ -176,54 +264,76 @@ async fn forbidden_access(stream: TcpStream) -> Result<(), std::io::Error> {
     writer.shutdown().await?;
     Ok(())
 }
+async fn make_request<'a>(
+    client: TcpStream,
+    method: Option<&'a str>,
+    path: Option<&'a str>,
+    headers: Option<&[httparse::Header<'a>]>,
+) -> Result<(), std::io::Error> {
+    match path {
+        Some(p) => match method {
+            Some("CONNECT") => {
+                eprintln!("CONNECT {}", p);
+                tunnel(client, p).await?
+            }
+            Some("GET") => {
+                eprintln!("GET {}", p);
+                get(client, p, headers.unwrap()).await?
+            }
+            Some(_) => {
+                eprint!("{} {}", method.unwrap(), p);
+                not_allowed(client).await?
+            }
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid path".to_string(),
+                ));
+            }
+        },
+        None => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid path".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
     let mut buf = vec![0; 1024];
     let mut nread: usize = 0;
     let config = CONFIG.read().await;
 
+    if !config.is_allowed(&addr.ip()) {
+        return forbidden_access(client).await;
+    }
+
     loop {
         client.readable().await?;
         match client.try_read(&mut buf[nread..]) {
             Ok(n) => {
-                let mut headers = [httparse::EMPTY_HEADER; 64];
+                let mut headers = [httparse::EMPTY_HEADER; 16];
                 let mut req = httparse::Request::new(&mut headers);
                 nread += n;
 
                 match req.parse(&mut buf) {
                     Ok(status) => {
                         if status.is_complete() {
-                            if req.method.unwrap() == "CONNECT" {
-                                println!("CONNECT {}", req.path.unwrap());
-                                if config.is_allowed(&addr.ip()) {
-                                    tunnel(client, req.path.unwrap()).await?;
-                                } else {
-                                    forbidden_access(client).await?;
-                                }
-                            } else if req.method.unwrap() == "GET" {
-                                println!("GET {}", req.path.unwrap());
-                                let mut headers: HashMap<&str, String> = HashMap::new();
-                                let iter = req.headers.iter();
-                                for h in iter {
-                                    headers.insert(
-                                        h.name,
-                                        String::from_utf8(h.value.to_vec()).unwrap(),
-                                    );
-                                }
-                                request(client, &req).await?;
-                            } else {
-                                request_not_allowed(client).await?;
-                            }
+                            make_request(client, req.method, req.path, Some(req.headers)).await?;
                             break;
                         } else {
+                            // Read again
                             continue;
                         }
-                    }
+                    } // Parse error
                     Err(e) => {
                         return Err(Error::new(ErrorKind::InvalidData, e.to_string()));
                     }
                 }
-            }
+            } // Read error
             Err(e) => {
                 if e.kind() == ErrorKind::WouldBlock {
                     continue;
@@ -235,6 +345,67 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
     }
     Ok(())
 }
+
+/*
+async fn handle_client2(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
+    let mut buf = vec![0; 1024];
+    let mut nread: usize = 0;
+    let config = CONFIG.read().await;
+
+    loop {
+        client.readable().await?;
+        match client.try_read(&mut buf[nread..]) {
+            Ok(n) => {
+                let mut headers = [httparse::EMPTY_HEADER; 16];
+                let mut req = httparse::Request::new(&mut headers);
+                nread += n;
+
+                match req.parse(&mut buf) {
+                    Ok(status) => {
+                        if status.is_complete() {
+                            if req.method.unwrap() == "CONNECT" {
+                                eprintln!("CONNECT {}", req.path.unwrap());
+                                if config.is_allowed(&addr.ip()) {
+                                    tunnel(client, req.path.unwrap()).await?;
+                                } else {
+                                    forbidden_access(client).await?;
+                                }
+                            } else if req.method.unwrap() == "GET" {
+                                eprintln!("GET {}", req.path.unwrap());
+                                let mut headers: HashMap<&str, String> = HashMap::new();
+                                let iter = req.headers.iter();
+                                for h in iter {
+                                    headers.insert(
+                                        h.name,
+                                        String::from_utf8(h.value.to_vec()).unwrap(),
+                                    );
+                                }
+                                request(client, &req).await?;
+                            } else {
+                                not_allowed(client).await?;
+                            }
+                            break;
+                        } else {
+                            continue;
+                        }
+                    } // Parse error
+                    Err(e) => {
+                        return Err(Error::new(ErrorKind::InvalidData, e.to_string()));
+                    }
+                }
+            } // Read error
+            Err(e) => {
+                if e.kind() == ErrorKind::WouldBlock {
+                    continue;
+                } else {
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+*/
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

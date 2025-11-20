@@ -1,13 +1,14 @@
+use hickory_resolver::ResolveError;
+use hickory_resolver::Resolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::name_server::TokioConnectionProvider;
 use std::net::SocketAddr;
-use trust_dns_resolver::TokioAsyncResolver;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::error::ResolveError;
 
 pub async fn resolve(config: ResolverConfig, name: &str) -> Result<Vec<SocketAddr>, ResolveError> {
-    let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
-    let res = resolver.lookup_ip(name).await?;
+    let resolver =
+        Resolver::builder_with_config(config, TokioConnectionProvider::default()).build();
     let mut addrs: Vec<SocketAddr> = vec![];
-    for ip in res.iter() {
+    for ip in resolver.lookup_ip(name).await?.iter() {
         addrs.push(SocketAddr::from((ip, 443)));
     }
     Ok(addrs)
