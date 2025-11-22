@@ -7,9 +7,20 @@ use std::net::SocketAddr;
 pub async fn resolve(config: ResolverConfig, name: &str) -> Result<Vec<SocketAddr>, ResolveError> {
     let resolver =
         Resolver::builder_with_config(config, TokioConnectionProvider::default()).build();
-    let mut addrs: Vec<SocketAddr> = vec![];
-    for ip in resolver.lookup_ip(name).await?.iter() {
-        addrs.push(SocketAddr::from((ip, 443)));
-    }
+
+    // Shine-metal Noob way
+    //let mut addrs: Vec<SocketAddr> = vec![];
+    //for ip in resolver.lookup_ip(name).await?.iter() {
+    //    addrs.push(SocketAddr::from((ip, 443)));
+    //}
+
+    //  Rusty way
+    let addrs = resolver
+        .lookup_ip(name)
+        .await?
+        .iter()
+        .map(|ip| SocketAddr::from((ip, 443)))
+        .collect();
+
     Ok(addrs)
 }

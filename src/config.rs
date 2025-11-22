@@ -1,3 +1,4 @@
+use hickory_resolver::config::ResolverConfig;
 use ipnet::IpNet;
 use lazy_static::lazy_static;
 use std::fs::File;
@@ -5,7 +6,8 @@ use std::io::{self, BufRead, BufReader};
 use std::net::IpAddr;
 use std::str::FromStr;
 use tokio::sync::RwLock;
-use hickory_resolver::config::ResolverConfig;
+
+// use crate::basic_auth::BasicAuth;
 
 const DEFAULT_ADDR: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
@@ -18,6 +20,12 @@ pub struct Config {
     allow_list: Vec<IpAddr>,
     deny_list: Vec<IpAddr>,
     pub doh_resolver: Option<ResolverConfig>,
+    pub auth: Option<BasicAuth>,
+}
+
+pub struct BasicAuth {
+    pub user: String,
+    pub password: String,
 }
 
 impl Default for Config {
@@ -29,6 +37,7 @@ impl Default for Config {
             allow_list: vec![],
             deny_list: vec![],
             doh_resolver: None,
+            auth: None,
         }
     }
 }
@@ -82,6 +91,27 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
                 }
             } else {
                 println!("{value} parse error");
+            }
+        }
+        "BasicAuth" => {
+            let mut index: usize = 0;
+
+            match value.find(' ') {
+                Some(n) => index = n,
+                None => match value.find('\t') {
+                    Some(n) => index = n,
+                    None => {}
+                },
+            }
+
+            // user<' ''\t'' '>passswrd
+
+            if index > 0 {
+                let (user, password) = value.split_at(index);
+                config.auth = Some(BasicAuth {
+                    user: user.trim().into(),
+                    password: password.trim().into(),
+                });
             }
         }
         // Additional configs

@@ -1,3 +1,4 @@
+use base64::Engine;
 use clap::Parser;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
@@ -250,20 +251,25 @@ async fn get<'a>(
 async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
     let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
     let (_, mut writer) = stream.into_split();
-    writer.write(http.as_bytes()).await?;
-    writer.flush().await?;
-    writer.shutdown().await?;
+    writer.write_all(http.as_bytes()).await?;
     Ok(())
 }
 
 async fn forbidden_access(stream: TcpStream) -> Result<(), std::io::Error> {
     let http = "HTTP/1.1 403 Forbidden\r\n\r\n";
     let (_, mut writer) = stream.into_split();
-    writer.write(http.as_bytes()).await?;
-    writer.flush().await?;
-    writer.shutdown().await?;
+    writer.write_all(http.as_bytes()).await?;
     Ok(())
 }
+
+async fn auth_request(mut stream: TcpStream) -> Result<(), std::io::Error> {
+    let http = "HTTP/1.1 407 Proxy Authentication Required\r\n\
+         Proxy-Authenticate: Basic realm=\"MyProxy\"\r\n\
+         Connection: close\r\n\r\n";
+    stream.write_all(http.as_bytes()).await?;
+    Ok(())
+}
+
 async fn make_request<'a>(
     client: TcpStream,
     method: Option<&'a str>,
@@ -302,6 +308,36 @@ async fn make_request<'a>(
     Ok(())
 }
 
+async fn check_auth<'a>(headers: Option<&[httparse::Header<'_>]>) -> bool {
+    let config = CONFIG.read().await;
+    match &config.auth {
+        Some(auth) => match headers {
+            Some(headers) => {
+                for header in headers {
+                    if header.name == "Proxy-Authorization" {
+                        let value = String::from_utf8_lossy(&header.value);
+                        if value.starts_with("Basic ") {
+                            match base64::engine::general_purpose::STANDARD.decode(&value[6..]) {
+                                Ok(v) => {
+                                    let value = String::from_utf8_lossy(&v);
+                                    let split: Vec<_> = value.splitn(2, ":").collect();
+                                    if split.len() == 2 {
+                                        return auth.user == split[0] && auth.password == split[1];
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
+        },
+        None => return true,
+    }
+    false
+}
+
 async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
     let mut buf = vec![0; 1024];
     let mut nread: usize = 0;
@@ -322,7 +358,12 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
                 match req.parse(&mut buf) {
                     Ok(status) => {
                         if status.is_complete() {
-                            make_request(client, req.method, req.path, Some(req.headers)).await?;
+                            if check_auth(Some(req.headers)).await {
+                                make_request(client, req.method, req.path, Some(req.headers))
+                                    .await?;
+                            } else {
+                                auth_request(client).await?;
+                            }
                             break;
                         } else {
                             // Read again
