@@ -21,6 +21,7 @@ pub struct Config {
     deny_list: Vec<IpAddr>,
     pub doh_resolver: Option<ResolverConfig>,
     pub auth: Option<BasicAuth>,
+    pub auth_realm: Option<String>,
 }
 
 pub struct BasicAuth {
@@ -38,6 +39,7 @@ impl Default for Config {
             deny_list: vec![],
             doh_resolver: None,
             auth: None,
+            auth_realm: None,
         }
     }
 }
@@ -112,6 +114,15 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
                     user: user.trim().into(),
                     password: password.trim().into(),
                 });
+            }
+        }
+        "BasicAuthRealm" => {
+            if value.starts_with('\"') && value.ends_with('\"') {
+                let l = value.len();
+                let s = &value[1..l - 1];
+                config.auth_realm = Some(s.to_string());
+            } else {
+                config.auth_realm = Some(value.to_string());
             }
         }
         // Additional configs

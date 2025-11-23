@@ -4,7 +4,12 @@ use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use std::net::SocketAddr;
 
-pub async fn resolve(config: ResolverConfig, name: &str) -> Result<Vec<SocketAddr>, ResolveError> {
+// https://doc.rust-lang.org/std/net/trait.ToSocketAddrs.html
+pub async fn resolve(
+    config: ResolverConfig,
+    name: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, ResolveError> {
     let resolver =
         Resolver::builder_with_config(config, TokioConnectionProvider::default()).build();
 
@@ -19,7 +24,7 @@ pub async fn resolve(config: ResolverConfig, name: &str) -> Result<Vec<SocketAdd
         .lookup_ip(name)
         .await?
         .iter()
-        .map(|ip| SocketAddr::from((ip, 443)))
+        .map(|ip| SocketAddr::from((ip, port)))
         .collect();
 
     Ok(addrs)

@@ -63,19 +63,35 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
     }
 }
 
-async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
+async fn tunnel(client: TcpStream, path: &str) -> Result<(), std::io::Error> {
     let tunnel_id = tokio::task::id();
     eprintln!("tunnel[{tunnel_id}] start");
     let stream: TcpStream;
     let config = CONFIG.read().await;
 
     if let Some(r) = &config.doh_resolver {
-        let n = uri.find(':').unwrap();
-        let addrs = resolve(r.clone(), &uri[..n]).await.expect("resolve error");
-        // https://doc.rust-lang.org/std/net/trait.ToSocketAddrs.html
-        stream = TcpStream::connect(&addrs[..]).await?;
+        let name: &str;
+        let port: u16;
+        match path.find(':') {
+            Some(i) => {
+                name = &path[..i];
+                port = u16::from_str_radix(&path[i + 1..], 10).unwrap_or(443);
+            }
+            None => {
+                let err = Error::new(ErrorKind::InvalidData, "Invalid path");
+                return Err(err);
+            }
+        };
+
+        match resolve(r.clone(), &name, port).await {
+            Ok(v) => stream = TcpStream::connect(&v[..]).await?,
+            Err(e) => {
+                let err = Error::new(ErrorKind::AddrNotAvailable, e.to_string());
+                return Err(err);
+            }
+        }
     } else {
-        stream = TcpStream::connect(uri).await?;
+        stream = TcpStream::connect(path).await?;
     }
 
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -120,6 +136,7 @@ async fn tunnel(client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/*
 async fn tunnel2(mut client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
     eprintln!("tunnel[{}] start", tokio::task::id());
     let stream: TcpStream;
@@ -146,6 +163,7 @@ async fn tunnel2(mut client: TcpStream, uri: &str) -> Result<(), std::io::Error>
 
     Ok(())
 }
+    */
 
 /*
 async fn request<'a>(
@@ -263,9 +281,13 @@ async fn forbidden_access(stream: TcpStream) -> Result<(), std::io::Error> {
 }
 
 async fn auth_request(mut stream: TcpStream) -> Result<(), std::io::Error> {
-    let http = "HTTP/1.1 407 Proxy Authentication Required\r\n\
-         Proxy-Authenticate: Basic realm=\"MyProxy\"\r\n\
-         Connection: close\r\n\r\n";
+    let config = CONFIG.read().await;
+    let realm = config.auth_realm.clone().unwrap_or("Tetanux".to_string());
+    let http = format!(
+        "HTTP/1.1 407 Proxy Authentication Required\r\n\
+         Proxy-Authenticate: Basic realm=\"{realm}\"\r\n\
+         Connection: close\r\n\r\n",
+    );
     stream.write_all(http.as_bytes()).await?;
     Ok(())
 }
@@ -371,7 +393,10 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
                         }
                     } // Parse error
                     Err(e) => {
-                        return Err(Error::new(ErrorKind::InvalidData, e.to_string()));
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            format!("Parse error: {}", e.to_string()),
+                        ));
                     }
                 }
             } // Read error
