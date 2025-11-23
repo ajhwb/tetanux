@@ -6,7 +6,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpSocket, TcpStream};
+use tokio::sync::oneshot;
 use url::Url;
 
 mod cli;
@@ -51,19 +52,14 @@ async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf
             break;
         }
 
-        if let Err(e) = writer.write(&buf[..nread]).await {
+        if let Err(e) = writer.write_all(&buf[..nread]).await {
             eprintln!("{id}: write error: {}", e.to_string());
             break;
-        } else {
-            if let Err(e) = writer.flush().await {
-                eprintln!("{id}: write error: {}", e.to_string());
-                break;
-            }
         }
     }
 }
 
-async fn tunnel(client: TcpStream, path: &str) -> Result<(), std::io::Error> {
+async fn tunnel(mut client: TcpStream, path: &str) -> Result<(), std::io::Error> {
     let tunnel_id = tokio::task::id();
     eprintln!("tunnel[{tunnel_id}] start");
     let stream: TcpStream;
@@ -95,36 +91,28 @@ async fn tunnel(client: TcpStream, path: &str) -> Result<(), std::io::Error> {
     }
 
     let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    client.write_all(http.as_bytes()).await?;
+    client.flush().await?;
 
     let mut client_half = client.into_split();
     let mut remote_half = stream.into_split();
-
-    client_half.1.write_all(http.as_bytes()).await?;
-    client_half.1.flush().await?;
-
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
-    let mut cancel_rx_clone = cancel_rx.clone();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
 
     let remote_to_client = tokio::spawn(async move {
         let id = format!("remote_to_client[{tunnel_id}:{}]", tokio::task::id());
         eprintln!("{id} start");
         tokio::select! {
             _ = relay(&id, &mut remote_half.0, &mut client_half.1) => {}
-            _ = cancel_rx.changed() => {},
+            _ = cancel_rx => {},
         }
-        drop(client_half.1);
         eprintln!("{id} end");
     });
 
     let client_to_remote = tokio::spawn(async move {
         let id = format!("client_to_remote[{}:{}]", tunnel_id, tokio::task::id());
         eprintln!("{id} start");
-
-        tokio::select! {
-            _ = relay(&id, &mut client_half.0, &mut remote_half.1) => {}
-            _ = cancel_rx_clone.changed() => {}
-        }
-        drop(remote_half.1);
+        let _ = relay(&id, &mut client_half.0, &mut remote_half.1).await;
+        let _ = remote_half.1.shutdown().await;
         let _ = cancel_tx.send(());
         eprintln!("{id} end");
     });
@@ -135,91 +123,6 @@ async fn tunnel(client: TcpStream, path: &str) -> Result<(), std::io::Error> {
 
     Ok(())
 }
-
-/*
-async fn tunnel2(mut client: TcpStream, uri: &str) -> Result<(), std::io::Error> {
-    eprintln!("tunnel[{}] start", tokio::task::id());
-    let stream: TcpStream;
-    let config = CONFIG.read().await;
-
-    if let Some(r) = &config.doh_resolver {
-        let n = uri.find(':').unwrap();
-        let addrs = resolve(r.clone(), &uri[..n]).await?;
-        // https://doc.rust-lang.org/std/net/trait.ToSocketAddrs.html
-        stream = TcpStream::connect(&addrs[..]).await?;
-    } else {
-        stream = TcpStream::connect(uri).await?;
-    }
-
-    let http = "HTTP/1.1 200 Connection Established\r\n\r\n";
-    client.write_all(http.as_bytes()).await?;
-    client.flush().await?;
-
-    let mut remote = stream;
-
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
-
-    eprintln!("tunnel[{}] end", tokio::task::id());
-
-    Ok(())
-}
-    */
-
-/*
-async fn request<'a>(
-    client: TcpStream,
-    req: &httparse::Request<'_, '_>,
-) -> Result<(), std::io::Error> {
-    //let path = Path::new(req.path.unwrap());
-    //let basename = path.file_name().unwrap().to_os_string();
-    //let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-    let url = match Url::parse(req.path.unwrap()) {
-        Ok(u) => u,
-        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "URL parse error")),
-    };
-
-    let mut http = String::new();
-    http += &format!("GET {} HTTP/1.1\r\n", url.path());
-    //http += &format!("Host: {}\r\n", url.host_str().unwrap());
-    for header in req.headers.iter() {
-        http += &format!(
-            "{}: {}\r\n",
-            header.name,
-            String::from_utf8_lossy(header.value)
-        );
-    }
-    http += &format!("Accept: /\r\n");
-    http += &format!("Connection: close\r\n");
-    http += &format!("\r\n\r\n");
-
-    let addr = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
-    let mut stream = TcpStream::connect(addr).await?;
-    //println!("{:#?}", http);
-    stream.write(http.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut buf = vec![0u8; 4096];
-    let mut client_half = client.into_split();
-
-    loop {
-        let len = stream.read(&mut buf).await?;
-        if len == 0 {
-            break;
-        }
-        client_half.1.write(&buf[..len]).await?;
-        client_half.1.flush().await?;
-    }
-
-    //let _ = writer.write(http.as_bytes()).await;
-    //let _ = writer.flush().await;
-    //let _ = writer.shutdown().await;
-
-    stream.shutdown().await?;
-    drop(client_half.1);
-
-    Ok(())
-}
-    */
 
 async fn get<'a>(
     client: TcpStream,
@@ -268,13 +171,6 @@ async fn get<'a>(
 
 async fn not_allowed(stream: TcpStream) -> Result<(), std::io::Error> {
     let http = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-    let (_, mut writer) = stream.into_split();
-    writer.write_all(http.as_bytes()).await?;
-    Ok(())
-}
-
-async fn forbidden_access(stream: TcpStream) -> Result<(), std::io::Error> {
-    let http = "HTTP/1.1 403 Forbidden\r\n\r\n";
     let (_, mut writer) = stream.into_split();
     writer.write_all(http.as_bytes()).await?;
     Ok(())
@@ -366,7 +262,8 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
     let config = CONFIG.read().await;
 
     if !config.is_allowed(&addr.ip()) {
-        return forbidden_access(client).await;
+        eprintln!("Host {} not allowed/denied", &addr.ip().to_string());
+        return Ok(());
     }
 
     loop {
@@ -412,67 +309,6 @@ async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::i
     Ok(())
 }
 
-/*
-async fn handle_client2(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
-    let mut buf = vec![0; 1024];
-    let mut nread: usize = 0;
-    let config = CONFIG.read().await;
-
-    loop {
-        client.readable().await?;
-        match client.try_read(&mut buf[nread..]) {
-            Ok(n) => {
-                let mut headers = [httparse::EMPTY_HEADER; 16];
-                let mut req = httparse::Request::new(&mut headers);
-                nread += n;
-
-                match req.parse(&mut buf) {
-                    Ok(status) => {
-                        if status.is_complete() {
-                            if req.method.unwrap() == "CONNECT" {
-                                eprintln!("CONNECT {}", req.path.unwrap());
-                                if config.is_allowed(&addr.ip()) {
-                                    tunnel(client, req.path.unwrap()).await?;
-                                } else {
-                                    forbidden_access(client).await?;
-                                }
-                            } else if req.method.unwrap() == "GET" {
-                                eprintln!("GET {}", req.path.unwrap());
-                                let mut headers: HashMap<&str, String> = HashMap::new();
-                                let iter = req.headers.iter();
-                                for h in iter {
-                                    headers.insert(
-                                        h.name,
-                                        String::from_utf8(h.value.to_vec()).unwrap(),
-                                    );
-                                }
-                                request(client, &req).await?;
-                            } else {
-                                not_allowed(client).await?;
-                            }
-                            break;
-                        } else {
-                            continue;
-                        }
-                    } // Parse error
-                    Err(e) => {
-                        return Err(Error::new(ErrorKind::InvalidData, e.to_string()));
-                    }
-                }
-            } // Read error
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock {
-                    continue;
-                } else {
-                    return Err(e.into());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-*/
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
@@ -482,8 +318,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = CONFIG.read().await;
-    let addr = SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
-    let listener = TcpListener::bind(addr).await?;
+    let socket = TcpSocket::new_v4().unwrap();
+    let _ = socket.set_reuseaddr(true);
+    let addr =
+        SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str()).unwrap();
+    let _ = socket.bind(addr).unwrap();
+    //let addr = SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
+    //let listener = TcpListener::bind(addr).await?;
+    let listener = socket.listen(1024).unwrap();
+    //listener.
     eprintln!("Listening on http://{}", addr);
 
     loop {
