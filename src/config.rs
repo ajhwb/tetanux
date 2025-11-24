@@ -22,6 +22,7 @@ pub struct Config {
     pub doh_resolver: Option<ResolverConfig>,
     pub auth: Option<BasicAuth>,
     pub auth_realm: Option<String>,
+    pub pid_file: Option<String>,
 }
 
 pub struct BasicAuth {
@@ -40,6 +41,7 @@ impl Default for Config {
             doh_resolver: None,
             auth: None,
             auth_realm: None,
+            pid_file: None,
         }
     }
 }
@@ -124,7 +126,10 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
             } else {
                 config.auth_realm = Some(value.to_string());
             }
-        }
+        },
+        "PidFile" => {
+            config.pid_file = Some(value.into());
+        },
         // Additional configs
         "DoHResolver" => {
             config.doh_resolver = match value {

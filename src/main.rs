@@ -16,6 +16,7 @@ mod config;
 use config::CONFIG;
 mod resolver;
 use resolver::resolve;
+mod utils;
 
 async fn relay(id: &str, reader: &mut OwnedReadHalf, writer: &mut OwnedWriteHalf) {
     let mut buf = vec![0; 8 * 1024];
@@ -318,6 +319,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = CONFIG.read().await;
+
+    match &config.pid_file {
+        Some(pid_file) => {
+            if let Err(e) = utils::create_pidfile(pid_file) {
+                eprintln!("Unable to create pid file: {}", e.to_string());
+                return Ok(());
+            }
+        }
+        None => {}
+    }
+
     let socket = TcpSocket::new_v4().unwrap();
     let _ = socket.set_reuseaddr(true);
     let addr =
