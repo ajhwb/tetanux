@@ -257,15 +257,9 @@ async fn check_auth<'a>(headers: Option<&[httparse::Header<'_>]>) -> bool {
     false
 }
 
-async fn handle_client(client: TcpStream, addr: SocketAddr) -> Result<(), std::io::Error> {
+async fn handle_client(client: TcpStream) -> Result<(), std::io::Error> {
     let mut buf = vec![0; 1024];
     let mut nread: usize = 0;
-    let config = CONFIG.read().await;
-
-    if !config.is_allowed(&addr.ip()) {
-        eprintln!("Host {} not allowed/denied", &addr.ip().to_string());
-        return Ok(());
-    }
 
     loop {
         client.readable().await?;
@@ -335,20 +329,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr =
         SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str()).unwrap();
     let _ = socket.bind(addr).unwrap();
-    //let addr = SocketAddr::from_str(format!("{}:{}", config.listen_addr, config.port).as_str())?;
-    //let listener = TcpListener::bind(addr).await?;
     let listener = socket.listen(1024).unwrap();
-    //listener.
     eprintln!("Listening on http://{}", addr);
+
+    let config = CONFIG.read().await;
 
     loop {
         let (stream, addr) = listener.accept().await?;
-        eprintln!("Handle client={}", addr.ip().to_string());
-        tokio::spawn(async move {
-            match handle_client(stream, addr).await {
-                Ok(_) => (),
-                Err(e) => eprintln!("error: {}", e.to_string()),
-            }
-        });
+
+        if config.is_allowed(&addr.ip()) {
+            eprintln!("Handle client={}", addr.ip().to_string());
+            tokio::spawn(async move {
+                match handle_client(stream).await {
+                    Ok(_) => (),
+                    Err(e) => eprintln!("error: {}", e.to_string()),
+                }
+            });
+        } else {
+            eprintln!("Host {} not allowed/denied", addr.ip().to_string());
+        }
     }
 }

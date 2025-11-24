@@ -7,6 +7,6 @@ pub fn create_pidfile(path: &str) -> io::Result<()> {
         .write(true)
         .truncate(true)
         .open(path)?;
-    let s = std::process::id().to_string();
+    let s = std::process::id().to_string() + "\n".into();
     f.write_all(s.as_bytes())
 }
