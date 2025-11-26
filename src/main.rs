@@ -142,7 +142,7 @@ async fn get<'a>(
         };
         let s = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
         stream = TcpStream::connect(s).await?;
-        index = path.find(url.path());
+        index = path.rfind(url.path());
     } else {
         let mut saddr: Option<SocketAddr> = None;
         let fd = client.as_fd();
