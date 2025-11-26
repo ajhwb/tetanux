@@ -33,12 +33,12 @@ Currently supported Tinyproxy configurations:
 * Port
 * Listen
 * Timeout
-* Allow
-* Deny
+* Allow (IP/network addresses only)
+* Deny (IP/network addresses only)
 * BasicAuth
 * BasicAuthRealm
 
-Please see Tinyproxy [documentation](https://tinyproxy.github.io#documentation) for more details. 
+Please see Tinyproxy [documentation](https://tinyproxy.github.io#documentation) for more details.
 
 **More configurations will be supported in the future releases**
 
@@ -53,6 +53,11 @@ Additional configurations:
 <td>Whether to use DNS over HTTPS/TLS instead of standard DNS</td>
 <td>Any of: cloudfare-https, cloudfare-tls, google-https, google-tls, quad9-https, quad9-tls</td>
 </tr>
+<tr>
+<td>Transparent</td>
+<td>Transparent proxy support, similar to Tinyproxy --enable-tranparent CLI's argument, plain HTTP only (see Transparent Proxy)</td>
+<td>yes or no, default no</td>
+</tr>
 </table>
 
 Example configuration file:
@@ -64,6 +69,10 @@ Timeout 600
 Allow 127.0.0.1
 DnsOver quad9-https
 ```
+
+### Transparent Proxy
+
+Tetanux only support plain HTTP in [NAT forward](https://en.wikipedia.org/wiki/Port_forwarding) configuration, HTTP SSL/TLS support is not supported since there are no simple and reliable methods. The common [SNI (Server Name Indication)](https://en.wikipedia.org/wiki/Server_Name_Indication) method is no longer guaranteed to work in the future after the new encrypted [Client Hello](https://en.wikipedia.org/wiki/Server_Name_Indication#Encrypted_Client_Hello) in TLS protocol.
 
 ## License
 
