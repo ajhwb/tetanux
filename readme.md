@@ -37,6 +37,7 @@ Currently supported Tinyproxy configurations:
 * Deny (IP/network addresses only)
 * BasicAuth
 * BasicAuthRealm
+* PidFile
 
 Please see Tinyproxy [documentation](https://tinyproxy.github.io#documentation) for more details.
 
