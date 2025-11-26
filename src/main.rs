@@ -132,7 +132,7 @@ async fn get<'a>(
     path: &str,
     headers: &[httparse::Header<'_>],
 ) -> Result<(), std::io::Error> {
-    let index = path.rfind('/');
+    let index;
     let mut stream: TcpStream;
 
     if path.starts_with("http://") {
@@ -142,6 +142,7 @@ async fn get<'a>(
         };
         let s = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
         stream = TcpStream::connect(s).await?;
+        index = path.find(url.path());
     } else {
         let mut saddr: Option<SocketAddr> = None;
         let fd = client.as_fd();
@@ -166,6 +167,8 @@ async fn get<'a>(
         eprintln!("ip: {}", addr.ip().to_string());
 
         stream = TcpStream::connect(addr).await?;
+
+        index = Some(0);
 
         /*if let Some(header) = headers.iter().find(|&&h| h.name == "Host") {
             let host = String::from_utf8_lossy(header.value);
