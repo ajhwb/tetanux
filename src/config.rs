@@ -23,6 +23,7 @@ pub struct Config {
     pub auth: Option<BasicAuth>,
     pub auth_realm: Option<String>,
     pub pid_file: Option<String>,
+    pub transparent: bool,
 }
 
 pub struct BasicAuth {
@@ -42,6 +43,7 @@ impl Default for Config {
             auth: None,
             auth_realm: None,
             pid_file: None,
+            transparent: true,
         }
     }
 }
@@ -126,10 +128,10 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
             } else {
                 config.auth_realm = Some(value.to_string());
             }
-        },
+        }
         "PidFile" => {
             config.pid_file = Some(value.into());
-        },
+        }
         // Additional configs
         "DoHResolver" => {
             config.doh_resolver = match value {
@@ -139,6 +141,7 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
                 _ => None,
             }
         }
+        "Transparent" => config.transparent = value.to_ascii_lowercase() == "yes",
         _ => (),
     }
 }

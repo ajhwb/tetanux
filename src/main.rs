@@ -1,7 +1,9 @@
 use base64::Engine;
 use clap::Parser;
+use socket2::SockRef;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
+use std::os::fd::AsFd;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -130,13 +132,58 @@ async fn get<'a>(
     path: &str,
     headers: &[httparse::Header<'_>],
 ) -> Result<(), std::io::Error> {
-    let url = match Url::parse(path) {
-        Ok(u) => u,
-        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "URL parse error")),
-    };
+    let index = path.rfind('/');
+    let mut stream: TcpStream;
+
+    if path.starts_with("http://") {
+        let url = match Url::parse(path) {
+            Ok(u) => u,
+            Err(_) => return Err(Error::new(ErrorKind::InvalidData, "URL parse error")),
+        };
+        let s = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
+        stream = TcpStream::connect(s).await?;
+    } else {
+        let mut saddr: Option<SocketAddr> = None;
+        let fd = client.as_fd();
+        let s = SockRef::from(&fd);
+
+        if let Ok(v) = s.original_dst_v4() {
+            saddr = v.as_socket();
+        } else if let Ok(v) = s.original_dst_v6() {
+            saddr = v.as_socket();
+        }
+
+        let addr = match saddr {
+            Some(v) => v,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Unable to retrive destination IP",
+                ));
+            }
+        };
+
+        eprintln!("ip: {}", addr.ip().to_string());
+
+        stream = TcpStream::connect(addr).await?;
+
+        /*if let Some(header) = headers.iter().find(|&&h| h.name == "Host") {
+            let host = String::from_utf8_lossy(header.value);
+            //eprintln!("Host: {host}");
+            url = match Url::from_str(&format!("http://{host}{path}")) {
+        } else {
+            return Err(Error::new(ErrorKind::InvalidData, "Host is missing"));
+        }*/
+    }
+
+    // Do do request
 
     let mut http = String::new();
-    http += &format!("GET {} HTTP/1.1\r\n", url.path());
+    let rpath = match index {
+        Some(i) => &path[i..],
+        None => "/",
+    };
+    http += &format!("GET {} HTTP/1.1\r\n", rpath);
 
     for header in headers.iter() {
         http += &format!(
@@ -149,11 +196,7 @@ async fn get<'a>(
     http += &format!("Connection: close\r\n");
     http += &format!("\r\n\r\n");
 
-    let addr = format!("{}:{}", url.host().unwrap(), url.port().unwrap_or(80));
-    let mut stream = TcpStream::connect(addr).await?;
-
-    stream.write(http.as_bytes()).await?;
-    stream.flush().await?;
+    stream.write_all(http.as_bytes()).await?;
 
     let mut buf = vec![0u8; 4096];
     let mut client_half = client.into_split();
@@ -163,8 +206,7 @@ async fn get<'a>(
         if len == 0 {
             break;
         }
-        client_half.1.write(&buf[..len]).await?;
-        client_half.1.flush().await?;
+        client_half.1.write_all(&buf[..len]).await?;
     }
 
     Ok(())
@@ -203,10 +245,10 @@ async fn make_request<'a>(
             }
             Some("GET") => {
                 eprintln!("GET {}", p);
-                get(client, p, headers.unwrap()).await?
+                get(client, p, headers.unwrap_or(&[httparse::EMPTY_HEADER; 0])).await?
             }
-            Some(_) => {
-                eprint!("{} {}", method.unwrap(), p);
+            Some(m) => {
+                eprint!("{} {}", &m, p);
                 not_allowed(client).await?
             }
             None => {
@@ -336,7 +378,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     loop {
         let (stream, addr) = listener.accept().await?;
-
         if config.is_allowed(&addr.ip()) {
             eprintln!("Handle client={}", addr.ip().to_string());
             tokio::spawn(async move {
