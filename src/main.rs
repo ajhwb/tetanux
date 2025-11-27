@@ -82,6 +82,8 @@ async fn tunnel(mut client: TcpStream, path: &str) -> Result<(), std::io::Error>
             }
         };
 
+        eprintln!("Resolving {name}");
+
         match resolve(r.clone(), &name, port).await {
             Ok(v) => stream = TcpStream::connect(&v[..]).await?,
             Err(e) => {

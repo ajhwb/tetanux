@@ -135,9 +135,12 @@ fn read_value(key: &str, value: &str, config: &mut Config) {
         // Additional configs
         "DoHResolver" => {
             config.doh_resolver = match value {
-                "cloudfare" => Some(ResolverConfig::cloudflare_https()),
-                "google" => Some(ResolverConfig::google_https()),
-                "quad9" => Some(ResolverConfig::quad9_https()),
+                "cloudfare-https" => Some(ResolverConfig::cloudflare_https()),
+                "cloudfare-tls" => Some(ResolverConfig::cloudflare_tls()),
+                "google-https" => Some(ResolverConfig::google_https()),
+                "google-tls" => Some(ResolverConfig::google_tls()),
+                "quad9-https" => Some(ResolverConfig::quad9_https()),
+                "quad9-tls" => Some(ResolverConfig::quad9_tls()),
                 _ => None,
             }
         }
